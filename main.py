@@ -1,35 +1,32 @@
-import keras.optimizers
+import numpy as np
 import pandas as pd
-import pickle
 import matplotlib.pyplot as plt
-from keras.models import Sequential
+from keras.models import Sequential, load_model
 from keras.layers import Dense, Dropout
+from keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 from scikeras.wrappers import KerasRegressor
 from sklearn.model_selection import cross_val_score
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
 from sklearn.compose import make_column_transformer
-#from statsmodels.tools.tools import add_constant
+from pandasgui import show
 
+epochs = 40
+batch_size = 100
 
 def CriaRede():
     #Criando modelo
     modelo = Sequential()
 
-    modelo.add(Dense(units=100, activation='leaky_relu', input_dim=315))
+    modelo.add(Dense(units=150, activation='relu', input_dim=22))
     modelo.add(Dropout(0.2))
-    modelo.add(Dense(units=100, activation='leaky_relu'))
+    modelo.add(Dense(units=150, activation='relu'))
+    modelo.add(Dropout(0.2))
+    modelo.add(Dense(units=150, activation='relu'))
     modelo.add(Dropout(0.2))
     modelo.add(Dense(units=1, activation='linear'))
 
-    lr_scheduler = keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate=0.0018,
-        decay_steps=70000,
-        decay_rate=0.008
-    )
-
-    modelo.compile(optimizer=keras.optimizers.Adam(learning_rate=lr_scheduler), loss='mae', metrics=['mae'])
+    modelo.compile(optimizer='adam', loss='mae', metrics=['mse'])
     return modelo
-
 
 def Carregar_Dados():
     #Preparando base de dados
@@ -38,27 +35,10 @@ def Carregar_Dados():
     dados = pd.read_csv('autos.csv', encoding='ISO-8859-1')
 
     #Removendo valores inconsistentes
-    dados = dados.drop('dateCrawled',axis=1)
-    dados = dados.drop('name',axis=1)
-    dados = dados.drop('seller',axis=1)
-    dados = dados.drop('offerType',axis=1)
-    dados = dados.drop('dateCreated',axis=1)
-    dados = dados.drop('nrOfPictures',axis=1)
-    dados = dados.drop('postalCode',axis=1)
-    dados = dados.drop('lastSeen',axis=1)
-    dados = dados[dados.price > 250]
+    dados = dados[['price', 'vehicleType', 'yearOfRegistration', 'gearbox', 'powerPS', 'kilometer', 'fuelType', 'notRepairedDamage']]
+    dados = dados.dropna()
+    dados = dados[dados.price > 800]
     dados = dados[dados.price < 350000]
-
-    #Definindo alguns previsores vazios para o dado mais utilizado
-    valores = {'vehicleType' : '', 'gearbox' : 'manuell',
-            'model' : '', 'fuelType' : 'benzin',
-            'notRepairedDamage' : 'nein'}
-
-    dados = dados.fillna(value = valores)
-
-    #Eliminando alguns registros com falta de dados
-    dados = dados[dados.vehicleType != '']
-    dados = dados[dados.model != '']
 
     #Separando dados previsores e target
     previsores = dados.drop('price', axis=1)
@@ -66,63 +46,58 @@ def Carregar_Dados():
 
     #Codificando previsores com metodo OneHotEncoder (Previsores categoricos nominais)
     encoder = make_column_transformer(
-                (OneHotEncoder(handle_unknown='ignore'), ['abtest', 'vehicleType', 'gearbox', 'model', 'fuelType', 'brand','notRepairedDamage']),
+                (OneHotEncoder(handle_unknown='ignore'), ['vehicleType','gearbox', 'fuelType', 'notRepairedDamage']),
                 remainder='passthrough', sparse_threshold=False)
     previsores = encoder.fit_transform(previsores)
 
-    #Salva encoding
-    with open('modelo_onehotenc.pkl', 'wb') as file:
-        pickle.dump(encoder, file)
-
-    #df = pd.DataFrame(previsores, columns=encoder.get_feature_names_out())
-    #A constant é adicionada através do bias no proprio modelo da rede neural
-    #x = add_constant(df)
+    #Normalizando dados
+    normalizador = MinMaxScaler()
+    previsores = normalizador.fit_transform(previsores)
 
     return previsores, target
 
 
-
-def GeraModelo():
+def Treinamento():
     previsores, target = Carregar_Dados()
-    modelo = CriaRede()
 
-    modelo.fit(previsores, target, epochs=100, batch_size=300)
-    modelo.save('Modelo.0.1')
+    #Definindo callbacks
+    es = EarlyStopping(monitor='loss', patience=10, verbose=1, min_delta= 1e-10)
+    rlp = ReduceLROnPlateau(monitor='loss', patience=5, verbose=1)
+    md_encoder = ModelCheckpoint(monitor='loss', filepath='Modelo.0.1', save_best_only=True, verbose=1)
 
-
-def OneHotEncoding(data):
-    #Carrega encoding
-    try:
-        encoder = pd.read_pickle('modelo_onehotenc.pkl')
-        transformed = encoder.fit_transform(data)
-        return transformed
-    except:
-        print('Treino o modelo para gerar o encoder')
-        return
-
-
-
-
-def Treinamento(previsores, target):
-
+    #Validação Cruzada
     modelo = KerasRegressor(build_fn=CriaRede,
-                            epochs=100,
-                            batch_size=300,
-                            cv=10)
+                            epochs=epochs,
+                            batch_size=batch_size,
+                            callbacks=[es, rlp, md_encoder])
 
 
     resultados = cross_val_score(estimator=modelo,
-                                 X=previsores, y=target, scoring='neg_mean_absolute_error')
+                                 X=previsores, y=target, cv=5, scoring='neg_mean_absolute_error')
 
-    media = abs(resultados.mean())
+    #Apresentando dados de treino
+    media = resultados.mean()
     desvio = resultados.std()
 
-    plt.bar(range(0,1), resultados)
+    plt.plot(resultados)
     plt.title('Histórico de Treinamento\n'+'Média:'+str(media)+'\nDesvio:'+str(desvio))
     plt.xlabel('Épocas')
     plt.ylabel('Perda')
     plt.show()
 
 
-GeraModelo()
+def Predict():
+    previsores, target = Carregar_Dados()
 
+    modelo = load_model('Modelo.0.1')
+
+    resultado = modelo.predict(previsores)
+
+    target = np.expand_dims(target, axis=1)
+
+    resultado = np.concatenate((resultado, target), axis=1)
+
+    predict = pd.DataFrame(data=resultado, columns=['Previsão', 'Preço'])
+    show(predict)
+
+Predict()
